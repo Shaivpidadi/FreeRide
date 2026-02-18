@@ -27,6 +27,7 @@ from main import (
     get_free_models,
     load_openclaw_config,
     save_openclaw_config,
+    ensure_config_structure,
     format_model_for_openclaw,
     OPENCLAW_CONFIG_PATH
 )
@@ -82,7 +83,7 @@ def test_model(api_key: str, model_id: str) -> tuple[bool, Optional[str]]:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/agent-security",
+        "HTTP-Referer": "https://github.com/Shaivpidadi/FreeRide",
         "X-Title": "FreeRide Health Check"
     }
 
@@ -113,7 +114,7 @@ def test_model(api_key: str, model_id: str) -> tuple[bool, Optional[str]]:
     except requests.Timeout:
         return False, "timeout"
     except requests.RequestException as e:
-        return False, f"request_error"
+        return False, "request_error"
 
 
 def get_next_available_model(api_key: str, state: dict, exclude_model: str = None) -> Optional[str]:
@@ -122,6 +123,10 @@ def get_next_available_model(api_key: str, state: dict, exclude_model: str = Non
 
     for model in models:
         model_id = model["id"]
+
+        # Skip the openrouter/free router - we want specific models
+        if "openrouter/free" in model_id:
+            continue
 
         # Skip if same as excluded model
         if exclude_model and model_id == exclude_model:
@@ -146,13 +151,17 @@ def get_next_available_model(api_key: str, state: dict, exclude_model: str = Non
 def rotate_to_next_model(api_key: str, state: dict, reason: str = "manual"):
     """Rotate to the next available model."""
     config = load_openclaw_config()
+    config = ensure_config_structure(config)
     current = config.get("agents", {}).get("defaults", {}).get("model", {}).get("primary")
 
     # Extract base model ID from OpenClaw format
     current_base = None
     if current:
         # openrouter/provider/model:free -> provider/model:free
-        current_base = current.replace("openrouter/", "")
+        if current.startswith("openrouter/"):
+            current_base = current[len("openrouter/"):]
+        else:
+            current_base = current
 
     print(f"[{datetime.now().isoformat()}] Rotating from: {current_base or 'none'}")
     print(f"  Reason: {reason}")
@@ -165,18 +174,35 @@ def rotate_to_next_model(api_key: str, state: dict, reason: str = "manual"):
 
     print(f"  New model: {next_model}")
 
-    # Update config
-    formatted = format_model_for_openclaw(next_model)
-    config["agents"]["defaults"]["model"]["primary"] = formatted
+    # Update config - primary uses provider prefix, fallbacks don't
+    formatted_primary = format_model_for_openclaw(next_model, with_provider_prefix=True)
+    config["agents"]["defaults"]["model"]["primary"] = formatted_primary
 
-    # Rebuild fallbacks from remaining models
+    # Add to models allowlist
+    formatted_for_list = format_model_for_openclaw(next_model, with_provider_prefix=False)
+    config["agents"]["defaults"]["models"][formatted_for_list] = {}
+
+    # Rebuild fallbacks from remaining models (using correct format: no provider prefix)
     models = get_free_models(api_key)
     fallbacks = []
+
+    # Always add openrouter/free as first fallback
+    free_router = "openrouter/free:free"
+    fallbacks.append(free_router)
+    config["agents"]["defaults"]["models"][free_router] = {}
+
     for m in models:
-        if m["id"] != next_model and not is_model_rate_limited(state, m["id"]):
-            fallbacks.append(format_model_for_openclaw(m["id"]))
-            if len(fallbacks) >= 5:
-                break
+        if m["id"] == next_model or "openrouter/free" in m["id"]:
+            continue
+        if is_model_rate_limited(state, m["id"]):
+            continue
+
+        fb_formatted = format_model_for_openclaw(m["id"], with_provider_prefix=False)
+        fallbacks.append(fb_formatted)
+        config["agents"]["defaults"]["models"][fb_formatted] = {}
+
+        if len(fallbacks) >= 5:
+            break
 
     config["agents"]["defaults"]["model"]["fallbacks"] = fallbacks
 
@@ -204,7 +230,10 @@ def check_and_rotate(api_key: str, state: dict) -> bool:
         return rotate_to_next_model(api_key, state, "initial_setup")
 
     # Extract base model ID
-    current_base = current.replace("openrouter/", "")
+    if current.startswith("openrouter/"):
+        current_base = current[len("openrouter/"):]
+    else:
+        current_base = current
 
     # Check if current model is rate limited
     if is_model_rate_limited(state, current_base):
@@ -231,8 +260,11 @@ def cleanup_old_rate_limits(state: dict):
     expired = []
 
     for model_id, limited_at_str in rate_limited.items():
-        limited_at = datetime.fromisoformat(limited_at_str)
-        if current_time - limited_at > timedelta(minutes=RATE_LIMIT_COOLDOWN_MINUTES):
+        try:
+            limited_at = datetime.fromisoformat(limited_at_str)
+            if current_time - limited_at > timedelta(minutes=RATE_LIMIT_COOLDOWN_MINUTES):
+                expired.append(model_id)
+        except (ValueError, TypeError):
             expired.append(model_id)
 
     for model_id in expired:
