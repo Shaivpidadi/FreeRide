@@ -44,7 +44,7 @@ That's it. FreeRide:
 ## Installation
 
 ```bash
-npx clawhub@latest install freeride
+npx clawhub@latest install free-ride
 cd ~/.openclaw/workspace/skills/free-ride
 pip install -e .
 ```
