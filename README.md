@@ -2,10 +2,13 @@
 
 ### Stop paying for AI. Start riding free.
 
+[![ClawHub Downloads](https://api.clawhub-badge.xyz/badge/free-ride/downloads.svg)](https://clawhub.ai/skills/free-ride)
+[![ClawHub Current Installs](https://api.clawhub-badge.xyz/badge/free-ride/installs-current.svg)](https://clawhub.ai/skills/free-ride)
+[![ClawHub Stars](https://api.clawhub-badge.xyz/badge/free-ride/stars.svg)](https://clawhub.ai/skills/free-ride)
+[![ClawHub Version](https://api.clawhub-badge.xyz/badge/free-ride/version.svg)](https://clawhub.ai/skills/free-ride)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![OpenClaw Compatible](https://img.shields.io/badge/OpenClaw-Compatible-blue.svg)](https://github.com/openclaw/openclaw)
-[![OpenRouter](https://img.shields.io/badge/OpenRouter-30%2B%20Free%20Models-orange.svg)](https://openrouter.ai)
-
 ---
 
 **FreeRide** gives you unlimited free AI in [OpenClaw](https://github.com/openclaw/openclaw) by automatically managing OpenRouter's free models.
@@ -44,7 +47,7 @@ That's it. FreeRide:
 ## Installation
 
 ```bash
-npx clawhub@latest install freeride
+npx clawhub@latest install free-ride
 cd ~/.openclaw/workspace/skills/free-ride
 pip install -e .
 ```
