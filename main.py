@@ -207,7 +207,7 @@ def save_openclaw_config(config: dict):
     OPENCLAW_CONFIG_PATH.write_text(json.dumps(config, indent=2))
 
 
-def format_model_for_openclaw(model_id: str, with_provider_prefix: bool = True) -> str:
+def format_model_for_openclaw(model_id: str, with_provider_prefix: bool = True, append_free: bool = True) -> str:
     """Format model ID for OpenClaw config.
 
     OpenClaw uses two formats:
@@ -231,7 +231,7 @@ def format_model_for_openclaw(model_id: str, with_provider_prefix: bool = True) 
         base_id = base_id[len("openrouter/"):]
 
     # Ensure :free suffix
-    if ":free" not in base_id:
+    if append_free and ":free" not in base_id:
         base_id = f"{base_id}:free"
 
     if with_provider_prefix:
@@ -288,7 +288,8 @@ def update_model_config(
     as_primary: bool = True,
     add_fallbacks: bool = True,
     fallback_count: int = 5,
-    setup_auth: bool = False
+    setup_auth: bool = False,
+    append_free: bool = True
 ) -> bool:
     """Update OpenClaw config with the specified model.
 
@@ -305,8 +306,8 @@ def update_model_config(
     if setup_auth:
         config = setup_openrouter_auth(config)
 
-    formatted_primary = format_model_for_openclaw(model_id, with_provider_prefix=True)
-    formatted_for_list = format_model_for_openclaw(model_id, with_provider_prefix=False)
+    formatted_primary = format_model_for_openclaw(model_id, with_provider_prefix=True, append_free=append_free)
+    formatted_for_list = format_model_for_openclaw(model_id, with_provider_prefix=False, append_free=append_free)
 
     if as_primary:
         # Set as primary model
@@ -473,7 +474,8 @@ def cmd_switch(args):
         matched_model,
         as_primary=not as_fallback,
         add_fallbacks=not args.no_fallbacks,
-        setup_auth=args.setup_auth
+        setup_auth=args.setup_auth,
+        append_free=False
     ):
         config = load_openclaw_config()
 
