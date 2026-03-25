@@ -1,3 +1,6 @@
+⚠️ Note: The FreeRide skill was recently removed from ClawHub without prior explanation.
+We’ve opened an issue for clarification: https://github.com/openclaw/clawhub/issues/1262
+
 # 🎢 FreeRide
 
 ### Stop paying for AI. Start riding free.
