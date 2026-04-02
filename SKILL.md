@@ -1,6 +1,18 @@
 ---
 name: freeride
 description: Manages free AI models from OpenRouter for OpenClaw. Automatically ranks models by quality, configures fallbacks for rate-limit handling, and updates openclaw.json. Use when the user mentions free AI, OpenRouter, model switching, rate limits, or wants to reduce AI costs.
+env:
+  - name: OPENROUTER_API_KEY
+    description: OpenRouter API key — get a free one at openrouter.ai/keys
+    required: true
+    secret: true
+network:
+  - openrouter.ai
+writes:
+  - ~/.openclaw/openclaw.json (keys: agents.defaults.model, agents.defaults.models only)
+  - ~/.openclaw/.freeride-cache.json
+  - ~/.openclaw/.freeride-watcher-state.json
+install: pip install -e .
 ---
 
 # FreeRide - Free AI for OpenClaw

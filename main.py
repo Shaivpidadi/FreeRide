@@ -42,25 +42,45 @@ TRUSTED_PROVIDERS = [
 ]
 
 
-def get_api_key() -> Optional[str]:
-    """Get OpenRouter API key from environment or OpenClaw config."""
-    # Try environment first
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if api_key:
-        return api_key
+def _parse_api_keys(raw: str) -> list:
+    """Parse a single key string or a JSON array of keys."""
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            keys = json.loads(raw)
+            if isinstance(keys, list):
+                return [k.strip() for k in keys if isinstance(k, str) and k.strip()]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return [raw] if raw else []
 
-    # Try OpenClaw config
+
+def get_api_keys() -> list:
+    """Get all OpenRouter API keys. Accepts a single key or a JSON array.
+
+    Single key:  export OPENROUTER_API_KEY="sk-or-v1-..."
+    Multiple:    export OPENROUTER_API_KEY='["sk-or-v1-key1", "sk-or-v1-key2"]'
+    """
+    raw = os.environ.get("OPENROUTER_API_KEY")
+    if raw:
+        return _parse_api_keys(raw)
+
     if OPENCLAW_CONFIG_PATH.exists():
         try:
             config = json.loads(OPENCLAW_CONFIG_PATH.read_text())
-            # Check env section
-            api_key = config.get("env", {}).get("OPENROUTER_API_KEY")
-            if api_key:
-                return api_key
+            raw = config.get("env", {}).get("OPENROUTER_API_KEY")
+            if raw:
+                return _parse_api_keys(raw)
         except (json.JSONDecodeError, KeyError):
             pass
 
-    return None
+    return []
+
+
+def get_api_key() -> Optional[str]:
+    """Get the first available OpenRouter API key."""
+    keys = get_api_keys()
+    return keys[0] if keys else None
 
 
 def fetch_all_models(api_key: str) -> list:
@@ -216,14 +236,10 @@ def format_model_for_openclaw(model_id: str, with_provider_prefix: bool = True, 
     """
     base_id = model_id
 
-    # Handle openrouter/free special case: "openrouter" is both the routing 
-    # prefix OpenClaw adds AND the actual provider name in the API model ID.
-    # The API model ID is "openrouter/free" (no :free suffix — it's a router, not a free-tier model).
-    #   - with prefix:    "openrouter/openrouter/free" (routing prefix + API ID)
-    #   - without prefix: "openrouter/free" (just the API ID)
+    # openrouter/free is OpenRouter's smart router — its API model ID is literally
+    # "openrouter/free" with no extra prefix. Adding another "openrouter/" prefix
+    # produces "openrouter/openrouter/free" which OpenClaw and OpenRouter both reject.
     if model_id in ("openrouter/free", "openrouter/free:free"):
-        if with_provider_prefix:
-            return "openrouter/openrouter/free"
         return "openrouter/free"
 
     # Remove existing openrouter/ routing prefix if present to get the base API ID
@@ -577,7 +593,7 @@ def cmd_auto(args):
 
 def cmd_status(args):
     """Show current configuration status."""
-    api_key = get_api_key()
+    keys = get_api_keys()
     config = load_openclaw_config()
     current = get_current_model(config)
     fallbacks = get_current_fallbacks(config)
@@ -586,12 +602,20 @@ def cmd_status(args):
     print("=" * 50)
 
     # API Key status
-    if api_key:
-        masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
-        print(f"OpenRouter API Key: {masked}")
+    if keys:
+        if len(keys) == 1:
+            k = keys[0]
+            masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "***"
+            print(f"OpenRouter API Key: {masked}")
+        else:
+            print(f"OpenRouter API Keys: {len(keys)} configured")
+            for i, k in enumerate(keys, 1):
+                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "***"
+                print(f"  {i}. {masked}")
     else:
         print("OpenRouter API Key: NOT SET")
-        print("  Set with: export OPENROUTER_API_KEY='sk-or-...'")
+        print("  Single key: export OPENROUTER_API_KEY='sk-or-...'")
+        print("  Multiple:   export OPENROUTER_API_KEY='[\"sk-or-key1\", \"sk-or-key2\"]'")
 
     # Auth profile status
     auth_profiles = config.get("auth", {}).get("profiles", {})
