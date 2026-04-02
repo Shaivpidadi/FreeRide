@@ -65,7 +65,8 @@ No credit card. No trial. Actually free.
 ### 2. Set Your Key
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPENROUTER_API_KEY="sk-or-v1-..."   OR
+export OPENROUTER_API_KEY=["sk-or-v1-...","sk-or-v2-..." ] # By passing multiple keys it swaps the key on 429 
 ```
 
 Or add it to your OpenClaw config:
