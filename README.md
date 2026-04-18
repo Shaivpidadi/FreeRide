@@ -300,3 +300,7 @@ MIT - Do whatever you want.
   ·
   <a href="https://github.com/openclaw/openclaw">🦞 Install OpenClaw</a>
 </p>
+
+## Download History
+
+[![Download History](https://skill-history.com/chart/shaivpidadi/free-ride.svg)](https://skill-history.com/shaivpidadi/free-ride)
