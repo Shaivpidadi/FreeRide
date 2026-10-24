@@ -2,7 +2,7 @@
   "name": "freeride",
   "displayName": "FreeRide - Free AI for OpenClaw",
   "version": "1.1.0",
-  "description": "Unlimited free AI access for OpenClaw via OpenRouter's free models with automatic fallback switching",
+  "description": "Unlimited free AI access for OpenClaw via OpenRouter's free models with automatic fallback switching, plus opt-in Groq, Gemini and Cerebras free tiers",
   "author": "Shaishav Pidadi",
   "repository": "https://github.com/Shaivpidadi/FreeRide",
   "license": "MIT",
@@ -12,36 +12,100 @@
     "auto",
     "status",
     "refresh",
-    "fallbacks"
+    "fallbacks",
+    "rotate",
+    "restore"
   ],
   "binaries": {
     "freeride": "main:main",
     "freeride-watcher": "watcher:main"
   },
   "dependencies": {
-    "requests": ">=2.31.0"
+    "requests": ">=2.31.0,<3"
   },
-  "secrets": ["OPENROUTER_API_KEY"],
+  "secrets": ["OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY"],
   "requiredEnv": ["OPENROUTER_API_KEY"],
   "config": {
     "OPENROUTER_API_KEY": {
-      "description": "Your OpenRouter API key (get free at openrouter.ai/keys)",
+      "description": "Your OpenRouter API key (get free at openrouter.ai/keys). Set it in your shell or ~/.openclaw/.env; never paste it into chat.",
       "required": true,
       "secret": true,
       "env": true
+    },
+    "GROQ_API_KEY": {
+      "description": "Optional. Groq key, used only with --providers groq.",
+      "required": false,
+      "secret": true,
+      "env": true
+    },
+    "GEMINI_API_KEY": {
+      "description": "Optional. Gemini key (GOOGLE_API_KEY also accepted), used only with --providers gemini --allow-training-providers.",
+      "required": false,
+      "secret": true,
+      "env": true
+    },
+    "GOOGLE_API_KEY": {
+      "description": "Optional. Alias for GEMINI_API_KEY.",
+      "required": false,
+      "secret": true,
+      "env": true
+    },
+    "CEREBRAS_API_KEY": {
+      "description": "Optional. Cerebras key, used only with --providers cerebras.",
+      "required": false,
+      "secret": true,
+      "env": true
+    },
+    "FREERIDE_PROVIDERS": {
+      "description": "Optional. Same as --providers (e.g. groq,cerebras). Unset means OpenRouter only.",
+      "required": false,
+      "secret": false,
+      "env": true
+    },
+    "FREERIDE_ALLOW_TRAINING": {
+      "description": "Optional. Same as --allow-training-providers (e.g. gemini).",
+      "required": false,
+      "secret": false,
+      "env": true
     }
   },
-  "network": ["openrouter.ai"],
+  "network": ["openrouter.ai", "api.groq.com", "generativelanguage.googleapis.com", "api.cerebras.ai"],
+  "reads": [
+    "~/.openclaw/openclaw.json",
+    "~/.openclaw/.env (keys only, never written)"
+  ],
+  "writes": [
+    "~/.openclaw/openclaw.json (only the configKeys below)",
+    "~/.openclaw/openclaw.json.freeride-tmp (temporary, replaced atomically)",
+    "~/.openclaw/openclaw.json.freeride-bak (copy taken before every write)",
+    "~/.openclaw/.freeride-state.json (+ .freeride-tmp sibling)",
+    "~/.openclaw/.freeride-cache.json",
+    "~/.openclaw/.freeride-watcher-state.json (+ .tmp sibling)",
+    "~/.openclaw/freeride-watcher.log (only via the suggested nohup redirect)",
+    "~/.openclaw/ (created if missing)"
+  ],
+  "neverWrites": [
+    "API keys, anywhere",
+    "~/.openclaw/.env",
+    "auth-profiles.json"
+  ],
+  "runs": [
+    "openclaw plugins list --json (read-only, only with --providers)",
+    "openclaw models list --all --provider <id> --json (read-only, only with --providers)"
+  ],
   "openclaw": {
     "compatible": true,
     "minVersion": "1.0.0",
     "configPath": "~/.openclaw/openclaw.json",
     "configKeys": [
-      "agents.defaults.model",
-      "agents.defaults.models"
+      "agents.defaults.model.primary",
+      "agents.defaults.model.fallbacks",
+      "agents.defaults.models.<model-ref>",
+      "auth.profiles.openrouter:default (only with --setup-auth, after confirmation)"
     ],
     "requiredSecrets": ["OPENROUTER_API_KEY"],
-    "networkAccess": ["openrouter.ai"]
+    "optionalSecrets": ["GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY"],
+    "networkAccess": ["openrouter.ai", "api.groq.com", "generativelanguage.googleapis.com", "api.cerebras.ai"]
   },
-  "install": "npx clawhub@latest install free-ride && cd ~/.openclaw/workspace/skills/free-ride && pip install -e ."
+  "install": "npx clawhub@0.23.3 --workdir ~/.openclaw/workspace install @shaivpidadi/free-ride --version 1.1.0 && cd ~/.openclaw/workspace/skills/@shaivpidadi/free-ride && pip install -e ."
 }

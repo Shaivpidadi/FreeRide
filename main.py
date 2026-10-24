@@ -8,6 +8,7 @@ for unlimited free AI access.
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,9 @@ except ImportError:
     print("Error: requests library required. Install with: pip install requests")
     sys.exit(1)
 
+import providers as provider_mod
+from keyguard import mask_key, redact
+
 
 # Constants
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/models"
@@ -27,6 +31,12 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENCLAW_CONFIG_PATH = Path.home() / ".openclaw" / "openclaw.json"
 CACHE_FILE = Path.home() / ".openclaw" / ".freeride-cache.json"
 CACHE_DURATION_HOURS = 6
+# Which primary/fallbacks FreeRide set, and what was there before.
+STATE_FILE = Path.home() / ".openclaw" / ".freeride-state.json"
+# Copy of openclaw.json taken before every FreeRide write.
+BACKUP_FILE = Path.home() / ".openclaw" / "openclaw.json.freeride-bak"
+# OpenClaw's recommended place for provider keys. FreeRide only reads it.
+DOTENV_PATH = Path.home() / ".openclaw" / ".env"
 
 # OpenRouter app-attribution headers — applied to every request so all
 # FreeRide traffic shows up under one identity on OpenRouter's App Activity
@@ -95,26 +105,35 @@ def _parse_api_keys(raw) -> list:
     return [raw] if raw else []
 
 
+def _read_config_quietly() -> dict:
+    """Best-effort config read for key lookup only. Never raises."""
+    try:
+        config = json.loads(OPENCLAW_CONFIG_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _resolve_keys(env_names) -> list:
+    raw = provider_mod.resolve_secret(env_names, _read_config_quietly(), DOTENV_PATH)
+    return _parse_api_keys(raw) if raw else []
+
+
 def get_api_keys() -> list:
     """Get all OpenRouter API keys. Accepts a single key or a JSON array.
 
-    Single key:  export OPENROUTER_API_KEY="sk-or-v1-..."
-    Multiple:    export OPENROUTER_API_KEY='["sk-or-v1-key1", "sk-or-v1-key2"]'
+    Single key:  OPENROUTER_API_KEY=sk-or-v1-...
+    Multiple:    OPENROUTER_API_KEY=["sk-or-v1-key1","sk-or-v1-key2"]
+
+    Looked up in the environment, then ~/.openclaw/.env, then `env.vars` and
+    the legacy `env` block of openclaw.json. FreeRide never writes keys.
     """
-    raw = os.environ.get("OPENROUTER_API_KEY")
-    if raw:
-        return _parse_api_keys(raw)
+    return _resolve_keys(("OPENROUTER_API_KEY",))
 
-    if OPENCLAW_CONFIG_PATH.exists():
-        try:
-            config = json.loads(OPENCLAW_CONFIG_PATH.read_text())
-            raw = config.get("env", {}).get("OPENROUTER_API_KEY")
-            if raw:
-                return _parse_api_keys(raw)
-        except (json.JSONDecodeError, KeyError):
-            pass
 
-    return []
+def get_provider_keys(name: str) -> list:
+    """Keys for an optional provider (groq, gemini, cerebras)."""
+    return _resolve_keys(provider_mod.PROVIDERS[name].env_vars)
 
 
 def get_api_key() -> Optional[str]:
@@ -136,7 +155,7 @@ def fetch_all_models() -> list:
         try:
             response = requests.get(OPENROUTER_API_URL, headers=_openrouter_headers(key), timeout=30)
         except requests.RequestException as e:
-            print(f"  Key {i}: network error ({e})")
+            print(f"  Key {i}: network error ({redact(e)})")
             continue
 
         if response.status_code == 200:
@@ -192,10 +211,12 @@ def filter_free_models(models: list) -> list:
             continue
 
         is_free = False
-        prompt_cost = model.get("pricing", {}).get("prompt")
+        pricing = model.get("pricing") or {}
+        prompt_cost = pricing.get("prompt")
         if prompt_cost is not None:
             try:
-                is_free = float(prompt_cost) == 0
+                # A model is only free if output is free too.
+                is_free = float(prompt_cost) == 0 and float(pricing.get("completion") or 0) == 0
             except (ValueError, TypeError):
                 pass
         if not is_free and ":free" in model_id:
@@ -295,21 +316,297 @@ def get_free_models(force_refresh: bool = False) -> list:
     return ranked_models
 
 
+class ConfigError(Exception):
+    """openclaw.json can't be safely read or rewritten. Nothing was written."""
+
+
+class UsageError(Exception):
+    """Bad command-line or environment input. Nothing was written."""
+
+
 def load_openclaw_config() -> dict:
-    """Load OpenClaw configuration."""
+    """Load OpenClaw configuration.
+
+    Raises ConfigError if the file exists but isn't plain JSON. OpenClaw
+    accepts JSON5 (comments, trailing commas); FreeRide can't round-trip
+    that, and treating it as empty would wipe the file on the next save.
+    """
     if not OPENCLAW_CONFIG_PATH.exists():
         return {}
 
     try:
-        return json.loads(OPENCLAW_CONFIG_PATH.read_text())
-    except json.JSONDecodeError:
+        text = OPENCLAW_CONFIG_PATH.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"Could not read {OPENCLAW_CONFIG_PATH}: {redact(e)}")
+    if not text.strip():
         return {}
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ConfigError(
+            f"{OPENCLAW_CONFIG_PATH} is not plain JSON "
+            f"({e.msg} at line {e.lineno}, column {e.colno}).\n"
+            "OpenClaw allows JSON5 (comments, trailing commas), but FreeRide only "
+            "rewrites files it can parse exactly, so it will not touch this one.\n"
+            "Nothing was written. To use FreeRide, remove the comments and trailing "
+            "commas from the file, then run the command again."
+        )
+    if not isinstance(config, dict):
+        raise ConfigError(f"{OPENCLAW_CONFIG_PATH} does not contain a JSON object. Nothing was written.")
+    return config
+
+
+def _ensure_writable(config: dict):
+    """Refuse configs FreeRide can't safely rewrite as a single file."""
+    if "$include" in config:
+        raise ConfigError(
+            f"{OPENCLAW_CONFIG_PATH} uses $include. FreeRide edits only this one file "
+            "and could shadow settings from the included files, so it will not write it.\n"
+            "Nothing was written. Set the model with `openclaw config set` instead."
+        )
+
+
+def _atomic_write(path: Path, content: str, mode: Optional[int] = None):
+    """Write via a temporary sibling + os.replace so a crash can't leave a
+    half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".freeride-tmp")
+    try:
+        with open(tmp, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def save_openclaw_config(config: dict):
-    """Save OpenClaw configuration."""
-    OPENCLAW_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OPENCLAW_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    """Save OpenClaw configuration: back up the current file, then write atomically."""
+    _ensure_writable(config)
+    mode = 0o600
+    if OPENCLAW_CONFIG_PATH.exists():
+        mode = OPENCLAW_CONFIG_PATH.stat().st_mode & 0o777
+        shutil.copy2(OPENCLAW_CONFIG_PATH, BACKUP_FILE)
+    _atomic_write(OPENCLAW_CONFIG_PATH, json.dumps(config, indent=2), mode)
+
+
+# ============== Ownership state ==============
+#
+# FreeRide only rotates a primary it set itself. The state file records
+# what FreeRide wrote and what was there before, so `freeride restore`
+# can put it back.
+
+STATE_SCHEMA = 1
+SMART_ROUTER_REF = "openrouter/openrouter/free"
+
+
+def _empty_state() -> dict:
+    return {
+        "schema": STATE_SCHEMA,
+        "primary_owner": None,      # "freeride", "user", or None (no primary)
+        "managed_primary": None,    # last primary FreeRide wrote
+        "managed_fallbacks": [],    # fallback entries FreeRide owns
+        "added_model_keys": [],     # agents.defaults.models keys FreeRide added
+        "providers": [],            # opted-in providers beyond OpenRouter
+        "allow_training": [],       # providers the user consented to despite prompt training
+        "previous": None,           # {"primary", "fallbacks", "saved_at"}
+    }
+
+
+def _looks_freeride_ref(ref) -> bool:
+    """A ref FreeRide would write itself: an OpenRouter free model or the
+    openrouter/free smart router."""
+    return isinstance(ref, str) and ref.startswith("openrouter/") and (
+        ref.endswith(":free") or ref == SMART_ROUTER_REF)
+
+
+def _infer_state(config: dict) -> dict:
+    """Build state for installs that predate the state file."""
+    state = _empty_state()
+    primary = get_current_model(config)
+    fallbacks = list(get_current_fallbacks(config) or [])
+    state["managed_fallbacks"] = [f for f in fallbacks if _looks_freeride_ref(f)]
+    if not primary:
+        return state
+    if _looks_freeride_ref(primary):
+        state["primary_owner"] = "freeride"
+        state["managed_primary"] = primary
+    else:
+        state["primary_owner"] = "user"
+        state["previous"] = {
+            "primary": primary,
+            "fallbacks": [f for f in fallbacks if f not in state["managed_fallbacks"]],
+            "saved_at": datetime.now().isoformat(),
+        }
+    return state
+
+
+def _read_state_file() -> Optional[dict]:
+    if not STATE_FILE.exists():
+        return None
+    try:
+        data = json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    state = _empty_state()
+    state.update(data)
+    return state
+
+
+def load_state(config: dict) -> dict:
+    """Ownership state, inferred from the config the first time."""
+    state = _read_state_file()
+    return state if state is not None else _infer_state(config)
+
+
+def save_state(state: dict):
+    _atomic_write(STATE_FILE, json.dumps(state, indent=2))
+
+
+def primary_is_managed(state: dict, primary) -> bool:
+    """True only for a primary FreeRide set and still owns."""
+    return bool(primary) and state.get("primary_owner") == "freeride" \
+        and state.get("managed_primary") == primary
+
+
+def _snapshot_previous(state: dict, config: dict):
+    """Save the current primary and the user's own fallbacks before a change.
+    A value FreeRide wrote never replaces the user's saved original."""
+    primary = get_current_model(config)
+    if state.get("previous") is not None and (not primary or primary == state.get("managed_primary")):
+        return
+    managed = state.get("managed_fallbacks") or []
+    state["previous"] = {
+        "primary": primary,
+        "fallbacks": [f for f in (get_current_fallbacks(config) or []) if f not in managed],
+        "saved_at": datetime.now().isoformat(),
+    }
+
+
+def _allow_model(config: dict, state: dict, ref: str):
+    """Add `ref` to the agents.defaults.models allowlist, keeping any
+    settings the user already has for it."""
+    models = config["agents"]["defaults"]["models"]
+    if ref not in models:
+        models[ref] = {}
+        if ref not in state["added_model_keys"]:
+            state["added_model_keys"].append(ref)
+
+
+def _set_managed_primary(config: dict, state: dict, ref: str):
+    config["agents"]["defaults"]["model"]["primary"] = ref
+    _allow_model(config, state, ref)
+    state["primary_owner"] = "freeride"
+    state["managed_primary"] = ref
+
+
+def _set_fallbacks(config: dict, state: dict, managed_new: list):
+    """Write FreeRide's fallbacks, keeping the user's own entries first."""
+    primary = get_current_model(config)
+    old_managed = state.get("managed_fallbacks") or []
+    user_entries = [f for f in (get_current_fallbacks(config) or [])
+                    if f not in old_managed and f != primary]
+    # FreeRide's own list is kept exactly as built (1.0 output is unchanged);
+    # only the user's entries are deduplicated against it.
+    merged = [f for f in user_entries if f not in managed_new] + list(managed_new)
+    for ref in managed_new:
+        _allow_model(config, state, ref)
+    state["managed_fallbacks"] = [f for f in managed_new if f not in user_entries]
+    config["agents"]["defaults"]["model"]["fallbacks"] = merged
+
+
+def _commit(config: dict, state: dict):
+    save_openclaw_config(config)
+    save_state(state)
+
+
+# ============== Optional providers ==============
+
+def resolve_providers(state: dict, flag_value=None, allow_training_flag: bool = False) -> list:
+    """Work out which extra providers are enabled for this run.
+
+    `--providers` wins and is remembered in the state file; otherwise
+    FREERIDE_PROVIDERS; otherwise what was remembered. With none of these,
+    the result is [] and FreeRide behaves as OpenRouter-only.
+    Raises ValueError on an unknown provider name.
+    """
+    try:
+        if flag_value is not None:
+            names = provider_mod.parse_provider_list(flag_value)
+        elif os.environ.get("FREERIDE_PROVIDERS") is not None:
+            names = provider_mod.parse_provider_list(os.environ["FREERIDE_PROVIDERS"])
+        else:
+            names = provider_mod.parse_provider_list(state.get("providers") or [])
+        env_consent = provider_mod.parse_provider_list(os.environ.get("FREERIDE_ALLOW_TRAINING") or [])
+    except ValueError as e:
+        raise UsageError(str(e))
+
+    consented = set(state.get("allow_training") or [])
+    consented.update(env_consent)
+    if allow_training_flag:
+        consented.update(n for n in names if provider_mod.PROVIDERS[n].trains_on_prompts)
+
+    enabled = []
+    for name in names:
+        provider = provider_mod.PROVIDERS[name]
+        if provider.trains_on_prompts and name not in consented:
+            print(f"Note: {name} needs explicit consent. {provider.data_note}")
+            print("  Add --allow-training-providers (or FREERIDE_ALLOW_TRAINING="
+                  f"{name}) to enable it. Skipping {name}.")
+            continue
+        if provider.trains_on_prompts and allow_training_flag:
+            print(f"Note: {provider.data_note}")
+        enabled.append(name)
+
+    if flag_value is not None:
+        state["providers"] = list(enabled)
+        state["allow_training"] = [n for n in enabled if provider_mod.PROVIDERS[n].trains_on_prompts]
+    return enabled
+
+
+def _validate_provider_args(args):
+    """Fail fast on a bad --providers value, before any network call."""
+    try:
+        provider_mod.parse_provider_list(getattr(args, "providers", None))
+    except ValueError as e:
+        raise UsageError(str(e))
+
+
+def _pick_provider_refs(names: list) -> dict:
+    """name -> OpenClaw ref for each enabled provider that passes its checks."""
+    picked = {}
+    if not names:
+        return picked
+    print("Checking optional providers...")
+    for name in names:
+        ref = provider_mod.pick_model(provider_mod.PROVIDERS[name], get_provider_keys(name))
+        if ref:
+            picked[name] = ref
+    return picked
+
+
+def _weave_provider_refs(base: list, picked: dict, total: int) -> list:
+    """Place provider refs into an OpenRouter fallback list: openrouter/free,
+    then Groq, Gemini, then OpenRouter free models, with Cerebras last.
+    The list keeps `total` entries; OpenRouter fills whatever is left."""
+    if not picked:
+        return base
+    router = [SMART_ROUTER_REF] if base and base[0] == SMART_ROUTER_REF else []
+    rest = base[len(router):]
+    head = router + [picked[n] for n in provider_mod.PROVIDER_ORDER
+                     if n in picked and n not in provider_mod.TAIL_PROVIDERS]
+    tail = [picked[n] for n in provider_mod.TAIL_PROVIDERS if n in picked]
+    room = max(0, total - len(head) - len(tail))
+    return (head + rest[:room] + tail)[:total]
 
 
 def format_model_for_openclaw(model_id: str, append_free: bool = True) -> str:
@@ -378,6 +675,37 @@ def ensure_config_structure(config: dict) -> dict:
     return config
 
 
+AUTH_PROFILE_ID = "openrouter:default"
+AUTH_PROFILE_VALUE = {"provider": "openrouter", "mode": "api_key"}
+
+
+def confirm_setup_auth(config: dict, assume_yes: bool) -> bool:
+    """Explain exactly what --setup-auth writes and get consent first.
+    Returns False if the user declined or no consent could be asked for."""
+    profiles = (config.get("auth") or {}).get("profiles") or {}
+    if AUTH_PROFILE_ID in profiles:
+        print(f"Auth profile {AUTH_PROFILE_ID} already exists; --setup-auth will not change it.")
+        return True
+    print(f"--setup-auth will add one entry to {OPENCLAW_CONFIG_PATH}:")
+    print(f'  auth.profiles["{AUTH_PROFILE_ID}"] = {json.dumps(AUTH_PROFILE_VALUE)}')
+    print("It tells OpenClaw to authenticate OpenRouter with your OPENROUTER_API_KEY.")
+    print("No API key is written, and auth-profiles.json is not touched.")
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print("Not running in a terminal, so FreeRide can't ask. Re-run with --yes to confirm.")
+        print("Nothing was written.")
+        return False
+    try:
+        answer = input("Add this entry? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer in ("y", "yes"):
+        return True
+    print("Cancelled. Nothing was written.")
+    return False
+
+
 def setup_openrouter_auth(config: dict) -> dict:
     """Set up OpenRouter auth profile if not exists."""
     if "auth" not in config:
@@ -385,11 +713,8 @@ def setup_openrouter_auth(config: dict) -> dict:
     if "profiles" not in config["auth"]:
         config["auth"]["profiles"] = {}
 
-    if "openrouter:default" not in config["auth"]["profiles"]:
-        config["auth"]["profiles"]["openrouter:default"] = {
-            "provider": "openrouter",
-            "mode": "api_key"
-        }
+    if AUTH_PROFILE_ID not in config["auth"]["profiles"]:
+        config["auth"]["profiles"][AUTH_PROFILE_ID] = dict(AUTH_PROFILE_VALUE)
         print("Added OpenRouter auth profile.")
 
     return config
@@ -401,7 +726,10 @@ def update_model_config(
     add_fallbacks: bool = True,
     fallback_count: int = 5,
     setup_auth: bool = False,
-    append_free: bool = True
+    append_free: bool = True,
+    providers_flag: Optional[str] = None,
+    allow_training: bool = False,
+    pin_user_primary: bool = False,
 ) -> bool:
     """Update OpenClaw config with the specified model.
 
@@ -411,9 +739,18 @@ def update_model_config(
         add_fallbacks: If True, also configure fallback models
         fallback_count: Number of fallback models to add
         setup_auth: If True, also set up OpenRouter auth profile
+        providers_flag: `--providers` value; None means env or saved choice
+        allow_training: `--allow-training-providers` was given
+        pin_user_primary: Mark the current primary as the user's, so FreeRide
+            never rotates it (used by `-f`)
     """
     config = load_openclaw_config()
+    _ensure_writable(config)
+    state = load_state(config)
     config = ensure_config_structure(config)
+    _snapshot_previous(state, config)
+
+    extra = resolve_providers(state, providers_flag, allow_training)
 
     if setup_auth:
         config = setup_openrouter_auth(config)
@@ -421,8 +758,9 @@ def update_model_config(
     formatted = format_model_for_openclaw(model_id, append_free=append_free)
 
     if as_primary:
-        config["agents"]["defaults"]["model"]["primary"] = formatted
-        config["agents"]["defaults"]["models"][formatted] = {}
+        _set_managed_primary(config, state, formatted)
+    elif pin_user_primary and get_current_model(config):
+        state["primary_owner"] = "user"
 
     if add_fallbacks and get_api_keys():
         free_models = get_free_models()
@@ -433,7 +771,6 @@ def update_model_config(
         smart_router = format_model_for_openclaw("openrouter/free")
         if formatted != smart_router:
             new_fallbacks.append(smart_router)
-            config["agents"]["defaults"]["models"][smart_router] = {}
 
         for m in free_models:
             if len(new_fallbacks) >= fallback_count:
@@ -450,17 +787,17 @@ def update_model_config(
                 continue
 
             new_fallbacks.append(m_formatted)
-            config["agents"]["defaults"]["models"][m_formatted] = {}
 
         if not as_primary:
             if formatted not in new_fallbacks:
                 insert_pos = 1 if smart_router in new_fallbacks else 0
                 new_fallbacks.insert(insert_pos, formatted)
-            config["agents"]["defaults"]["models"][formatted] = {}
 
-        config["agents"]["defaults"]["model"]["fallbacks"] = new_fallbacks
+        picked = _pick_provider_refs(extra)
+        new_fallbacks = _weave_provider_refs(new_fallbacks, picked, max(fallback_count, len(new_fallbacks)))
+        _set_fallbacks(config, state, new_fallbacks)
 
-    save_openclaw_config(config)
+    _commit(config, state)
     return True
 
 
@@ -470,8 +807,8 @@ def cmd_list(args):
     """List available free models ranked by quality."""
     if not get_api_keys():
         print("Error: OPENROUTER_API_KEY not set")
-        print("Set it via: export OPENROUTER_API_KEY='sk-or-...'")
-        print("Or get a free key at: https://openrouter.ai/keys")
+        print("Add OPENROUTER_API_KEY=<your key> to ~/.openclaw/.env in your editor,")
+        print("or export it in your shell. Get a free key at: https://openrouter.ai/keys")
         sys.exit(1)
 
     print("Fetching free models from OpenRouter...")
@@ -532,6 +869,12 @@ def cmd_switch(args):
     model_id = args.model
     as_fallback = args.fallback_only
 
+    config = load_openclaw_config()
+    _ensure_writable(config)
+    if args.setup_auth and not confirm_setup_auth(config, args.yes):
+        sys.exit(1)
+    _validate_provider_args(args)
+
     # Validate model exists and is free
     models = get_free_models()
     model_ids = [m["id"] for m in models]
@@ -562,7 +905,10 @@ def cmd_switch(args):
         as_primary=not as_fallback,
         add_fallbacks=not args.no_fallbacks,
         setup_auth=args.setup_auth,
-        append_free=False
+        append_free=False,
+        providers_flag=args.providers,
+        allow_training=args.allow_training_providers,
+        pin_user_primary=as_fallback,
     ):
         config = load_openclaw_config()
 
@@ -594,7 +940,11 @@ def cmd_auto(args):
         sys.exit(1)
 
     config = load_openclaw_config()
+    _ensure_writable(config)
     current_primary = get_current_model(config)
+    if args.setup_auth and not confirm_setup_auth(config, args.yes):
+        sys.exit(1)
+    _validate_provider_args(args)
 
     print("Finding best free model...")
     models = get_free_models(force_refresh=True)
@@ -625,6 +975,8 @@ def cmd_auto(args):
     if not as_fallback:
         if current_primary:
             print(f"\nReplacing current primary: {current_primary}")
+            if not primary_is_managed(load_state(config), current_primary):
+                print("  (saved first; `freeride restore` puts it back)")
         print(f"\nBest free model: {model_id}")
         print(f"Context length: {context:,} tokens")
         print(f"Quality score: {score:.3f}")
@@ -637,13 +989,18 @@ def cmd_auto(args):
         as_primary=not as_fallback,
         add_fallbacks=True,
         fallback_count=args.fallback_count,
-        setup_auth=args.setup_auth
+        setup_auth=args.setup_auth,
+        providers_flag=args.providers,
+        allow_training=args.allow_training_providers,
+        pin_user_primary=as_fallback,
     ):
         config = load_openclaw_config()
 
         if as_fallback:
             print("\nFallbacks configured!")
             print(f"Primary (unchanged): {get_current_model(config)}")
+            if get_current_model(config):
+                print("  Marked as yours: FreeRide and freeride-watcher will not change it.")
             print("First fallback: openrouter/free (smart router - auto-selects best available)")
         else:
             print("\nOpenClaw config updated!")
@@ -674,18 +1031,15 @@ def cmd_status(args):
     # API Key status
     if keys:
         if len(keys) == 1:
-            k = keys[0]
-            masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "***"
-            print(f"OpenRouter API Key: {masked}")
+            print(f"OpenRouter API Key: {mask_key(keys[0])}")
         else:
             print(f"OpenRouter API Keys: {len(keys)} configured")
             for i, k in enumerate(keys, 1):
-                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "***"
-                print(f"  {i}. {masked}")
+                print(f"  {i}. {mask_key(k)}")
     else:
         print("OpenRouter API Key: NOT SET")
-        print("  Single key: export OPENROUTER_API_KEY='sk-or-...'")
-        print("  Multiple:   export OPENROUTER_API_KEY='[\"sk-or-key1\", \"sk-or-key2\"]'")
+        print("  Add OPENROUTER_API_KEY=<your key> to ~/.openclaw/.env, or export it.")
+        print('  Multiple keys: OPENROUTER_API_KEY=["key1","key2"]')
 
     # Auth profile status
     auth_profiles = config.get("auth", {}).get("profiles", {})
@@ -695,7 +1049,13 @@ def cmd_status(args):
         print("OpenRouter Auth Profile: Not set (use --setup-auth to add)")
 
     # Current model
+    state = load_state(config)
     print(f"\nPrimary Model: {current or 'Not configured'}")
+    if current:
+        if primary_is_managed(state, current):
+            print("  Set by FreeRide (rotates when it fails)")
+        else:
+            print("  Yours (FreeRide will not change it)")
 
     # Fallbacks
     if fallbacks:
@@ -704,6 +1064,19 @@ def cmd_status(args):
             print(f"  - {fb}")
     else:
         print("Fallback Models: None configured")
+
+    # Optional providers
+    enabled = state.get("providers") or []
+    print(f"\nExtra providers: {', '.join(enabled) if enabled else 'none (OpenRouter only)'}")
+    for name in provider_mod.PROVIDER_ORDER:
+        have = "set" if get_provider_keys(name) else "missing"
+        print(f"  {name}: key {have}")
+
+    prev = state.get("previous") if STATE_FILE.exists() else None
+    if prev is not None:
+        print(f"\nSaved for restore: primary {prev.get('primary') or '(none)'}, "
+              f"{len(prev.get('fallbacks') or [])} fallback(s) "
+              "(run `freeride restore --dry-run` to preview)")
 
     # Cache status
     if CACHE_FILE.exists():
@@ -743,7 +1116,10 @@ def cmd_fallbacks(args):
         print("Error: OPENROUTER_API_KEY not set")
         sys.exit(1)
 
+    _validate_provider_args(args)
     config = load_openclaw_config()
+    _ensure_writable(config)
+    state = load_state(config)
     current = get_current_model(config)
 
     if not current:
@@ -753,8 +1129,10 @@ def cmd_fallbacks(args):
     print(f"Current primary: {current or 'None'}")
     print(f"Setting up {args.count} fallback models...")
 
+    extra = resolve_providers(state, args.providers, args.allow_training_providers)
     models = get_free_models()
     config = ensure_config_structure(config)
+    _snapshot_previous(state, config)
 
     fallbacks = []
 
@@ -762,7 +1140,6 @@ def cmd_fallbacks(args):
     smart_router = format_model_for_openclaw("openrouter/free")
     if not current or current != smart_router:
         fallbacks.append(smart_router)
-        config["agents"]["defaults"]["models"][smart_router] = {}
 
     for m in models:
         formatted = format_model_for_openclaw(m["id"])
@@ -775,10 +1152,11 @@ def cmd_fallbacks(args):
             break
 
         fallbacks.append(formatted)
-        config["agents"]["defaults"]["models"][formatted] = {}
 
-    config["agents"]["defaults"]["model"]["fallbacks"] = fallbacks
-    save_openclaw_config(config)
+    fallbacks = _weave_provider_refs(fallbacks, _pick_provider_refs(extra), args.count)
+    _set_fallbacks(config, state, fallbacks)
+    _commit(config, state)
+    fallbacks = get_current_fallbacks(config)
 
     print(f"\nConfigured {len(fallbacks)} fallback models:")
     for i, fb in enumerate(fallbacks, 1):
@@ -837,8 +1215,12 @@ def _test_model(model_id: str):
     return False, "all_keys_exhausted"
 
 
-def rotate(force: bool = False, fallback_count: int = 5):
+def rotate(force: bool = False, fallback_count: int = 5,
+           providers_flag: Optional[str] = None, allow_training: bool = False):
     """Live-test current primary; swap to a verified working model if it fails.
+
+    Only touches a primary FreeRide set itself (or bootstraps one when there
+    is none). A primary the user configured is never probed or replaced.
 
     Tests every candidate via /chat/completions before writing it to config, so
     no stale model IDs end up in the fallback chain. Tries multiple API keys.
@@ -850,8 +1232,14 @@ def rotate(force: bool = False, fallback_count: int = 5):
         return False, "no_keys"
 
     config = load_openclaw_config()
+    _ensure_writable(config)
+    state = load_state(config)
     config = ensure_config_structure(config)
     current = get_current_model(config)
+
+    if current and not primary_is_managed(state, current):
+        return False, "user_owned"
+
     current_base = _config_primary_to_api_id(current) if current else None
 
     if current_base and not force:
@@ -861,6 +1249,8 @@ def rotate(force: bool = False, fallback_count: int = 5):
             print("  Status: OK — no rotation needed.")
             return False, None
         print(f"  Status: {err}")
+
+    extra = resolve_providers(state, providers_flag, allow_training)
 
     print("Finding a working free model...")
     models = get_free_models(force_refresh=True)
@@ -897,21 +1287,17 @@ def rotate(force: bool = False, fallback_count: int = 5):
     if not new_primary:
         return False, "no_working_models"
 
+    _snapshot_previous(state, config)
     formatted = format_model_for_openclaw(new_primary)
-    config["agents"]["defaults"]["model"]["primary"] = formatted
-    config["agents"]["defaults"]["models"][formatted] = {}
+    _set_managed_primary(config, state, formatted)
 
     smart_router = format_model_for_openclaw("openrouter/free")
-    fallbacks = [smart_router]
-    config["agents"]["defaults"]["models"][smart_router] = {}
-    for fb_id in verified_fallbacks:
-        fb_fmt = format_model_for_openclaw(fb_id)
-        fallbacks.append(fb_fmt)
-        config["agents"]["defaults"]["models"][fb_fmt] = {}
+    fallbacks = [smart_router] + [format_model_for_openclaw(fb_id) for fb_id in verified_fallbacks]
+    fallbacks = _weave_provider_refs(fallbacks, _pick_provider_refs(extra), fallback_count)
+    _set_fallbacks(config, state, fallbacks)
+    _commit(config, state)
 
-    config["agents"]["defaults"]["model"]["fallbacks"] = fallbacks
-    save_openclaw_config(config)
-
+    fallbacks = get_current_fallbacks(config)
     print(f"Done. Primary: {formatted}")
     print(f"Fallbacks ({len(fallbacks)}):")
     for fb in fallbacks:
@@ -925,7 +1311,15 @@ def cmd_rotate(args):
         print("Error: OPENROUTER_API_KEY not set")
         sys.exit(1)
 
-    changed, err = rotate(force=args.force, fallback_count=args.fallback_count)
+    _validate_provider_args(args)
+    changed, err = rotate(force=args.force, fallback_count=args.fallback_count,
+                          providers_flag=args.providers,
+                          allow_training=args.allow_training_providers)
+    if err == "user_owned":
+        print(f"Primary {get_current_model()} was not set by FreeRide (or was kept with -f),")
+        print("so FreeRide will not test or replace it.")
+        print("To hand the primary to FreeRide, run `freeride auto` (your current one is saved first).")
+        sys.exit(1)
     if err == "fetch_failed":
         print("Error: could not fetch free model list (all keys exhausted?).")
         sys.exit(1)
@@ -936,6 +1330,68 @@ def cmd_rotate(args):
         print("\nRestart OpenClaw for changes to take effect.")
     elif not err:
         print("  (Use --force to rotate anyway.)")
+
+
+def cmd_restore(args):
+    """Put back the primary and fallbacks that were there before FreeRide."""
+    state = _read_state_file()
+    prev = state.get("previous") if state else None
+    if prev is None:
+        print("Nothing to restore: FreeRide has no saved primary or fallbacks.")
+        return
+
+    config = load_openclaw_config()
+    _ensure_writable(config)
+    config = ensure_config_structure(config)
+    model = config["agents"]["defaults"]["model"]
+    models = config["agents"]["defaults"]["models"]
+
+    primary = prev.get("primary")
+    fallbacks = list(prev.get("fallbacks") or [])
+    keep = {primary} | set(fallbacks)
+    drop_keys = [k for k in state.get("added_model_keys") or [] if k in models and k not in keep]
+
+    print(f"Primary:   {model.get('primary') or '(none)'}  ->  {primary or '(none)'}")
+    print(f"Fallbacks: {len(model.get('fallbacks') or [])} entries  ->  {len(fallbacks)} entries")
+    for fb in fallbacks:
+        print(f"  - {fb}")
+    if drop_keys:
+        print(f"Removing {len(drop_keys)} model allowlist entries FreeRide added.")
+
+    if args.dry_run:
+        print("\nDry run: nothing was written.")
+        return
+
+    if primary:
+        model["primary"] = primary
+    else:
+        model.pop("primary", None)
+    if fallbacks:
+        model["fallbacks"] = fallbacks
+    else:
+        model.pop("fallbacks", None)
+    for k in drop_keys:
+        models.pop(k, None)
+
+    state["primary_owner"] = "user" if primary else None
+    state["managed_primary"] = None
+    state["managed_fallbacks"] = []
+    state["added_model_keys"] = []
+    state["previous"] = None
+    _commit(config, state)
+
+    print(f"\nRestored. Backup of the previous file: {BACKUP_FILE}")
+    if not primary:
+        print("Note: a running freeride-watcher sets a new primary when none is configured.")
+    print("Restart OpenClaw for changes to take effect.")
+
+
+def _add_provider_args(p):
+    p.add_argument("--providers", metavar="LIST", default=None,
+                   help="Opt in to extra free providers after OpenRouter: groq, gemini, cerebras "
+                        "(comma-separated; remembered). 'openrouter' turns them off again.")
+    p.add_argument("--allow-training-providers", action="store_true",
+                   help="Consent to providers whose free tier may use prompts for training (gemini)")
 
 
 def main():
@@ -956,20 +1412,26 @@ def main():
     switch_parser = subparsers.add_parser("switch", help="Switch to a specific model")
     switch_parser.add_argument("model", help="Model ID to switch to")
     switch_parser.add_argument("--fallback-only", "-f", action="store_true",
-                              help="Add to fallbacks only, don't change primary")
+                              help="Add to fallbacks only, don't change primary (marks it as yours)")
     switch_parser.add_argument("--no-fallbacks", action="store_true",
                               help="Don't configure fallback models")
     switch_parser.add_argument("--setup-auth", action="store_true",
-                              help="Also set up OpenRouter auth profile")
+                              help="Also add the auth.profiles[\"openrouter:default\"] entry (asks first)")
+    switch_parser.add_argument("--yes", "-y", action="store_true",
+                              help="Confirm --setup-auth without asking")
+    _add_provider_args(switch_parser)
 
     # auto command
     auto_parser = subparsers.add_parser("auto", help="Auto-select best free model")
     auto_parser.add_argument("--fallback-count", "-c", type=int, default=5,
                             help="Number of fallback models (default: 5)")
     auto_parser.add_argument("--fallback-only", "-f", action="store_true",
-                            help="Add to fallbacks only, don't change primary")
+                            help="Add to fallbacks only, don't change primary (marks it as yours)")
     auto_parser.add_argument("--setup-auth", action="store_true",
-                            help="Also set up OpenRouter auth profile")
+                            help="Also add the auth.profiles[\"openrouter:default\"] entry (asks first)")
+    auto_parser.add_argument("--yes", "-y", action="store_true",
+                            help="Confirm --setup-auth without asking")
+    _add_provider_args(auto_parser)
 
     # status command
     subparsers.add_parser("status", help="Show current configuration")
@@ -981,6 +1443,7 @@ def main():
     fallbacks_parser = subparsers.add_parser("fallbacks", help="Configure fallback models")
     fallbacks_parser.add_argument("--count", "-c", type=int, default=5,
                                  help="Number of fallback models (default: 5)")
+    _add_provider_args(fallbacks_parser)
 
     # rotate command
     rotate_parser = subparsers.add_parser("rotate",
@@ -989,26 +1452,35 @@ def main():
                               help="Rotate even if the current primary is healthy")
     rotate_parser.add_argument("--fallback-count", "-c", type=int, default=5,
                               help="Total fallback slots including openrouter/free (default: 5)")
+    _add_provider_args(rotate_parser)
+
+    # restore command
+    restore_parser = subparsers.add_parser("restore",
+        help="Put back the primary and fallbacks from before FreeRide changed them")
+    restore_parser.add_argument("--dry-run", action="store_true",
+                               help="Show what would change without writing")
 
     args = parser.parse_args()
 
-    if args.command == "list":
-        cmd_list(args)
-    elif args.command == "switch":
-        cmd_switch(args)
-    elif args.command == "auto":
-        cmd_auto(args)
-    elif args.command == "status":
-        cmd_status(args)
-    elif args.command == "refresh":
-        cmd_refresh(args)
-    elif args.command == "fallbacks":
-        cmd_fallbacks(args)
-    elif args.command == "rotate":
-        cmd_rotate(args)
-    else:
+    handlers = {
+        "list": cmd_list,
+        "switch": cmd_switch,
+        "auto": cmd_auto,
+        "status": cmd_status,
+        "refresh": cmd_refresh,
+        "fallbacks": cmd_fallbacks,
+        "rotate": cmd_rotate,
+        "restore": cmd_restore,
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
         parser.print_help()
         sys.exit(1)
+    try:
+        handler(args)
+    except (ConfigError, UsageError) as e:
+        print(f"Error: {e}")
+        sys.exit(2)
 
 
 if __name__ == "__main__":
