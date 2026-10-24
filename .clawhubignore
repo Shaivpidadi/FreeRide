@@ -1,0 +1,8 @@
+# Development-only files, not needed to run the skill.
+tests/
+requirements-dev.txt
+.github/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/

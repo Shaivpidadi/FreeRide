@@ -16,3 +16,6 @@ Hardening model selection and auth setup, plus opt-in providers.
 - Optional providers, off unless you enable them with `--providers`: Groq (tool-capable free models), Gemini (needs `--allow-training-providers`; Google may use free-tier prompts for training), and Cerebras (last, after a live tool-call check). OpenRouter free models stay the default.
 - `skill.json` now lists the `rotate` and `restore` commands.
 - Added a test suite (`python -m pytest`).
+- SKILL.md declares its requirements in the `metadata.openclaw` block ClawHub reads: required and optional env vars (including `FREERIDE_PROVIDERS` and `FREERIDE_ALLOW_TRAINING`), the `openclaw` and Python binaries, and the homepage.
+- New `.clawhubignore` keeps the tests out of the published skill.
+- License is now MIT-0, matching ClawHub.

@@ -2,7 +2,7 @@
 
 ### Stop paying for AI. Start riding free.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-green.svg)](https://opensource.org/license/mit-0)
 [![OpenClaw Compatible](https://img.shields.io/badge/OpenClaw-Compatible-blue.svg)](https://github.com/openclaw/openclaw)
 ---
 
@@ -406,7 +406,7 @@ python -m pytest -q
 
 ## License
 
-MIT - Do whatever you want.
+[MIT-0](LICENSE) (MIT No Attribution), the license ClawHub uses for every published skill. Do whatever you want; no attribution needed.
 
 ---
 

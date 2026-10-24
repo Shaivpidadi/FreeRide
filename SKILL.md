@@ -48,6 +48,41 @@ runs:
   - openclaw plugins list --json (read only, only with --providers)
   - openclaw models list --all --provider <id> --json (read only, only with --providers)
 install: npx clawhub@0.23.3 --workdir ~/.openclaw/workspace install @shaivpidadi/free-ride --version 1.1.0 && cd ~/.openclaw/workspace/skills/@shaivpidadi/free-ride && pip install -e .
+metadata:
+  openclaw:
+    emoji: "\U0001F3A2"
+    homepage: https://github.com/Shaivpidadi/FreeRide
+    requires:
+      env:
+        - OPENROUTER_API_KEY
+      bins:
+        - openclaw
+      anyBins:
+        - python3
+        - python
+    primaryEnv: OPENROUTER_API_KEY
+    envVars:
+      - name: OPENROUTER_API_KEY
+        required: true
+        description: OpenRouter API key, free at openrouter.ai/keys. Set it in ~/.openclaw/.env, never in chat.
+      - name: GROQ_API_KEY
+        required: false
+        description: Groq key, used only with --providers groq.
+      - name: GEMINI_API_KEY
+        required: false
+        description: Gemini key, used only with --providers gemini --allow-training-providers.
+      - name: GOOGLE_API_KEY
+        required: false
+        description: Alias for GEMINI_API_KEY.
+      - name: CEREBRAS_API_KEY
+        required: false
+        description: Cerebras key, used only with --providers cerebras.
+      - name: FREERIDE_PROVIDERS
+        required: false
+        description: Same as --providers (e.g. groq,cerebras). Unset means OpenRouter only.
+      - name: FREERIDE_ALLOW_TRAINING
+        required: false
+        description: Same as --allow-training-providers (e.g. gemini).
 ---
 
 # FreeRide - Free AI for OpenClaw
