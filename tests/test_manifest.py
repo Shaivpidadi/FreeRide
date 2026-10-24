@@ -128,3 +128,80 @@ def test_setup_auth_declared_with_condition():
     assert auth and "--setup-auth" in auth[0]
     assert "auth-profiles.json" in " ".join(SKILL_JSON["neverWrites"])
     assert "auth-profiles.json" in SKILL_MD
+
+
+# What the code reads and runs, found from the source rather than listed by hand.
+_SOURCES = ("main.py", "providers.py", "watcher.py", "keyguard.py")
+
+
+def _source_calls():
+    """Env var names and binaries the shipped code uses, from string literals
+    passed to os.environ / os.getenv, Provider(env_vars=...), _resolve_keys(...)
+    and shutil.which(...)."""
+    import ast
+
+    env, bins = set(), set()
+
+    def literals(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return {e.value for e in node.elts if isinstance(e, ast.Constant)}
+        return set()
+
+    for name in _SOURCES:
+        for node in ast.walk(ast.parse((ROOT / name).read_text())):
+            if isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ":
+                env |= literals(node.slice)
+            if not isinstance(node, ast.Call):
+                continue
+            func = ast.unparse(node.func)
+            if func in ("os.environ.get", "os.getenv", "_resolve_keys") and node.args:
+                env |= literals(node.args[0])
+            if func == "shutil.which" and node.args:
+                bins |= literals(node.args[0])
+            for kw in node.keywords:
+                if kw.arg == "env_vars":
+                    env |= literals(kw.value)
+    return env, bins
+
+
+def _openclaw_meta():
+    import yaml
+
+    return yaml.safe_load(_frontmatter(SKILL_MD))["metadata"]["openclaw"]
+
+
+def test_frontmatter_declares_every_env_var_the_code_reads():
+    env, _ = _source_calls()
+    assert "OPENROUTER_API_KEY" in env and "FREERIDE_PROVIDERS" in env  # the scan works
+    meta = _openclaw_meta()
+    declared = {v["name"]: v["required"] for v in meta["envVars"]}
+    assert set(declared) == env
+    assert set(SKILL_JSON["config"]) == env
+    required = sorted(k for k, req in declared.items() if req)
+    assert required == meta["requires"]["env"] == SKILL_JSON["requiredEnv"] == ["OPENROUTER_API_KEY"]
+    assert meta["primaryEnv"] == "OPENROUTER_API_KEY"
+    for name, req in declared.items():
+        assert SKILL_JSON["config"][name]["required"] is req, name
+
+
+def test_frontmatter_declares_every_binary_the_code_runs():
+    _, bins = _source_calls()
+    assert bins == {"openclaw"}
+    meta = _openclaw_meta()
+    assert bins <= set(meta["requires"]["bins"])
+    assert "python3" in meta["requires"]["anyBins"]
+
+
+def test_license_is_mit0_everywhere():
+    assert SKILL_JSON["license"] == "MIT-0"
+    assert 'license="MIT-0"' in (ROOT / "setup.py").read_text()
+    assert (ROOT / "LICENSE").read_text().startswith("MIT No Attribution")
+    assert "licen" not in _frontmatter(SKILL_MD).lower()
+
+
+def test_published_bundle_leaves_out_tests():
+    ignored = (ROOT / ".clawhubignore").read_text().split()
+    assert "tests/" in ignored
+    assert "requirements-dev.txt" in ignored

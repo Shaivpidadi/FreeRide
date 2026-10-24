@@ -5,7 +5,8 @@
   "description": "Unlimited free AI access for OpenClaw via OpenRouter's free models with automatic fallback switching, plus opt-in Groq, Gemini and Cerebras free tiers",
   "author": "Shaishav Pidadi",
   "repository": "https://github.com/Shaivpidadi/FreeRide",
-  "license": "MIT",
+  "license": "MIT-0",
+  "homepage": "https://github.com/Shaivpidadi/FreeRide",
   "commands": [
     "list",
     "switch",

@@ -11,7 +11,7 @@ setup(
         "requests>=2.31.0,<3",
     ],
     extras_require={
-        "test": ["pytest>=7"],
+        "test": ["pytest>=7", "PyYAML>=6"],
     },
     entry_points={
         "console_scripts": [
@@ -20,9 +20,9 @@ setup(
         ],
     },
     python_requires=">=3.8",
-    license="MIT",
+    license="MIT-0",
     classifiers=[
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: MIT No Attribution License (MIT-0)",
         "Programming Language :: Python :: 3",
     ],
 )
