@@ -11,38 +11,26 @@
 [![OpenClaw Compatible](https://img.shields.io/badge/OpenClaw-Compatible-blue.svg)](https://github.com/openclaw/openclaw)
 ---
 
-> ## 🚀 FreeRide v3 is out — works with **any** OpenAI-compatible agent
+> ## 🚀 Want more than OpenClaw + OpenRouter? Try FreeRide v3
 >
-> The version on this repo (v2) is OpenClaw-specific and OpenRouter-only.
+> This skill (1.x) is a small config writer: it picks OpenRouter free models
+> for OpenClaw and writes them into `openclaw.json`.
 > **[FreeRide v3](https://github.com/Shaivpidadi/FreeRideV3)** is a local
-> OpenAI-compatible gateway that routes across **5 free-tier providers**
-> (OpenRouter, Groq, NVIDIA NIM, Cloudflare Workers AI, HuggingFace) with
-> automatic failover, and works with **Aider, Continue, Hermes, OpenClaw,
-> the OpenAI Python SDK, and any other OpenAI-shaped client**.
+> gateway on `localhost:11343` that routes every request across free tiers
+> (OpenRouter, Gemini, Groq, Ollama Cloud, Z.ai, NVIDIA NIM, Cloudflare and
+> more) and fails over **inside the same response** when one rate-limits.
+> It works with OpenClaw, Aider, Continue, Hermes, OpenCode, the Claude /
+> Codex / Gemini CLIs, and anything that speaks the OpenAI API.
 >
 > ```bash
 > uv tool install freeride-gateway==0.4.0a28   # or: pipx install freeride-gateway==0.4.0a28
-> # put OPENROUTER_API_KEY=<your key> in your shell profile or .env, then:
+> freeride init                                  # asks for keys, stores them in ~/.freeride/.env
 > freeride serve
+> freeride bind openclaw                         # points OpenClaw at the gateway
 > ```
 >
-> (A one-line installer also exists: `curl -sSL https://api.free-ride.xyz/install.sh | sh`.
-> It fetches a script that is not version-pinned, so read it before running it.)
->
-> Then point any agent at `http://localhost:11343/v1` — or use a binder:
->
-> ```bash
-> freeride bind aider       # writes ~/.aider.conf.yml
-> freeride bind continue    # writes ~/.continue/config.yaml
-> freeride bind hermes      # writes ~/.hermes/config.yaml
-> freeride bind openclaw    # writes ~/.openclaw/openclaw.json
-> ```
->
-> 👉 **Repo:** https://github.com/Shaivpidadi/FreeRideV3 · **Site:** https://free-ride.xyz · **PyPI:** `pip install freeride-gateway`
->
-> The v2 surface below still works for existing OpenClaw users — v3 ships
-> v2 backwards-compat shims (`freeride auto/list/switch/...`), so an
-> in-place upgrade preserves your existing setup.
+> See [Should I use v3?](#should-i-use-1x-or-v3) below for the differences before you switch.
+> 👉 **Repo:** https://github.com/Shaivpidadi/FreeRideV3 · **Site:** https://free-ride.xyz
 
 ---
 
@@ -230,7 +218,7 @@ After running `freeride auto` and `openclaw gateway restart`:
 openclaw models list
 
 # Validate config
-openclaw doctor --fix
+openclaw config validate
 
 # Open the dashboard and chat
 openclaw dashboard
@@ -371,12 +359,39 @@ You're welcome.
                      └──────────────┘
 ```
 
+## Should I use 1.x or v3?
+
+| | FreeRide 1.x (this skill) | FreeRide v3 |
+|---|---|---|
+| What it is | Writes model refs into `openclaw.json`, then gets out of the way | A local gateway process that serves every request |
+| Agents | OpenClaw | OpenClaw, Aider, Continue, Hermes, OpenCode, Claude / Codex / Gemini CLIs, any OpenAI-compatible client |
+| Providers | OpenRouter free models; Groq, Gemini, Cerebras opt-in | OpenRouter, Gemini, Groq, Ollama Cloud, Z.ai, NVIDIA NIM, Cloudflare, local Ollama and more |
+| When a model fails | OpenClaw walks the fallback list; `freeride-watcher` rotates the primary | The gateway retries the next provider inside the same request |
+| Runs in the background | Nothing (the watcher is optional) | `freeride serve` must be running |
+| Network calls of its own | Only to the model providers | Model providers, plus an hourly aggregate usage beacon that is on by default (`freeride telemetry` shows it, `freeride telemetry off` stops it) |
+
+Stay on 1.x if you only use OpenClaw and want nothing running in the background. Move to v3 if you use other agents, keep hitting OpenRouter's daily limit, or want failover that doesn't depend on a fallback list.
+
+**Switching from 1.x to v3:**
+
+```bash
+freeride restore --dry-run      # optional: see what you had before FreeRide
+freeride restore                # optional: put it back first
+pip uninstall freeride          # v3 installs its own `freeride` and `freeride-watcher` commands
+uv tool install freeride-gateway==0.4.0a28
+freeride init && freeride serve
+freeride bind openclaw
+openclaw gateway restart
+```
+
+Stop `freeride-watcher` from 1.x before you switch. `freeride bind openclaw` adds a `models.providers.freeride` block and an `auth.profiles["freeride:default"]` pointer, and sets the primary to a `freeride/...` ref. FreeRide 1.x treats that primary as yours and never replaces it. v3 also has `freeride auto` / `list` / `switch` for OpenClaw; those follow 1.0.x behavior and don't have 1.1.0's ownership tracking or `restore`.
+
 ## Contributing
 
 Found a bug? Want a feature? PRs welcome.
 
 ```bash
-cd ~/.openclaw/workspace/skills/free-ride
+cd ~/.openclaw/workspace/skills/@shaivpidadi/free-ride   # skills/free-ride for older installs
 
 # Test commands
 freeride list
