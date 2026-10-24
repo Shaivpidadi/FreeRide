@@ -20,10 +20,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from keyguard import redact
 from main import (
+    ConfigError,
     get_api_keys,
     get_current_model,
     load_openclaw_config,
+    load_state as load_ownership_state,
+    primary_is_managed,
     rotate,
     _test_model,
     _config_primary_to_api_id,
@@ -33,6 +37,9 @@ from main import (
 STATE_FILE = Path.home() / ".openclaw" / ".freeride-watcher-state.json"
 DEFAULT_INTERVAL_SECONDS = 60
 MIN_INTERVAL_SECONDS = 15
+
+# The primary we last said we're leaving alone, so the daemon logs it once.
+_skipped_primary = None
 
 
 def _atomic_write(path: Path, content: str):
@@ -64,8 +71,17 @@ def _record_rotation(state: dict, reason: str):
 
 
 def check_and_rotate(state: dict) -> bool:
-    """Probe current primary; rotate if it fails. Returns True if config was changed."""
-    config = load_openclaw_config()
+    """Probe current primary; rotate if it fails. Returns True if config was changed.
+
+    Only a primary FreeRide set is probed. A user-configured primary is
+    never tested (that could cost money) and never replaced.
+    """
+    global _skipped_primary
+    try:
+        config = load_openclaw_config()
+    except ConfigError as e:
+        print(f"[{datetime.now().isoformat()}] Not touching the config: {e}")
+        return False
     current = get_current_model(config)
 
     if not current:
@@ -77,6 +93,13 @@ def check_and_rotate(state: dict) -> bool:
             print(f"  Bootstrap failed: {err}")
         return changed
 
+    if not primary_is_managed(load_ownership_state(config), current):
+        if _skipped_primary != current:
+            print(f"[{datetime.now().isoformat()}] Primary {current} is user-configured, not touching it.")
+            _skipped_primary = current
+        return False
+    _skipped_primary = None
+
     current_base = _config_primary_to_api_id(current)
     ok, err = _test_model(current_base)
     if ok:
@@ -87,6 +110,8 @@ def check_and_rotate(state: dict) -> bool:
     changed, rot_err = rotate(force=True)
     if changed:
         _record_rotation(state, err or "unknown")
+    elif rot_err == "user_owned":
+        pass
     elif rot_err:
         print(f"  Rotation failed: {rot_err}")
     return changed
@@ -118,7 +143,7 @@ def run_daemon(interval: int):
         try:
             check_and_rotate(state)
         except Exception as e:
-            print(f"[{datetime.now().isoformat()}] Watcher error: {e}")
+            print(f"[{datetime.now().isoformat()}] Watcher error: {redact(e)}")
 
         # Interruptible sleep so SIGTERM isn't held up by a long interval.
         for _ in range(interval):
@@ -134,7 +159,11 @@ def run_once():
         print("Error: OPENROUTER_API_KEY not set")
         sys.exit(1)
     state = load_state()
-    check_and_rotate(state)
+    try:
+        check_and_rotate(state)
+    except ConfigError as e:
+        print(f"Error: {e}")
+        sys.exit(2)
 
 
 def show_status():
